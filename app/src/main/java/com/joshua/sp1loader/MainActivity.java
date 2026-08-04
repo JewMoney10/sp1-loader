@@ -1,10 +1,12 @@
 package com.joshua.sp1loader;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.database.Cursor;
 import android.hardware.usb.UsbDevice;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.view.Gravity;
@@ -21,12 +23,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Test/control screen - no XML layout files needed, everything is built in
- * code. Diagnostic buttons (scan/connect/echo/state/test write) at top for
- * debugging the USB link; below that, a real track-list editor: add songs
- * (title/artist come from the WAV's own metadata, filename as fallback),
- * delete songs, and transfer the whole album - skipping anything already
- * fully transferred, same as the website.
+ * Control screen - no XML layout files needed, everything is built in code.
+ * Scan/Connect/Disconnect/Check State at top for managing the USB link;
+ * below that, the track-list editor: add songs (title/artist come from the
+ * WAV's own metadata, filename as fallback), delete songs (with a
+ * confirmation - these are hard to undo once transferred data is
+ * invalidated), and transfer the whole album - skipping anything already
+ * fully transferred, same as the website. A foreground service keeps the
+ * transfer running if the screen sleeps or you switch to another app.
  */
 public class MainActivity extends Activity {
 
@@ -51,7 +55,7 @@ public class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(24, 24, 24, 24);
 
-        // --- Diagnostic tools ---
+        // --- Connection controls ---
 
         final Button scanButton = new Button(this);
         scanButton.setText("Scan USB devices");
@@ -66,20 +70,10 @@ public class MainActivity extends Activity {
         disconnectButton.setEnabled(false);
         root.addView(disconnectButton);
 
-        final Button echoButton = new Button(this);
-        echoButton.setText("Send ECHO");
-        echoButton.setEnabled(false);
-        root.addView(echoButton);
-
         final Button stateButton = new Button(this);
         stateButton.setText("Check Device State");
         stateButton.setEnabled(false);
         root.addView(stateButton);
-
-        final Button testWriteButton = new Button(this);
-        testWriteButton.setText("Test Write");
-        testWriteButton.setEnabled(false);
-        root.addView(testWriteButton);
 
         final ProgressBar progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progressBar.setMax(100);
@@ -123,9 +117,7 @@ public class MainActivity extends Activity {
                 output.setText("Connected to " + device.getDeviceName() + " - ready.");
                 connectButton.setEnabled(false);
                 disconnectButton.setEnabled(true);
-                echoButton.setEnabled(true);
                 stateButton.setEnabled(true);
-                testWriteButton.setEnabled(true);
                 transferAlbumButton.setEnabled(true);
             }
 
@@ -134,9 +126,7 @@ public class MainActivity extends Activity {
                 output.setText("Connection failed: " + reason);
                 connectButton.setEnabled(true);
                 disconnectButton.setEnabled(false);
-                echoButton.setEnabled(false);
                 stateButton.setEnabled(false);
-                testWriteButton.setEnabled(false);
                 transferAlbumButton.setEnabled(false);
             }
 
@@ -145,9 +135,7 @@ public class MainActivity extends Activity {
                 output.setText("Disconnected.");
                 connectButton.setEnabled(true);
                 disconnectButton.setEnabled(false);
-                echoButton.setEnabled(false);
                 stateButton.setEnabled(false);
-                testWriteButton.setEnabled(false);
                 transferAlbumButton.setEnabled(false);
             }
 
@@ -157,9 +145,7 @@ public class MainActivity extends Activity {
                         + "wait a few seconds, then tap Connect to SP-1 again.");
                 connectButton.setEnabled(true);
                 disconnectButton.setEnabled(false);
-                echoButton.setEnabled(false);
                 stateButton.setEnabled(false);
-                testWriteButton.setEnabled(false);
                 transferAlbumButton.setEnabled(false);
             }
         });
@@ -195,25 +181,6 @@ public class MainActivity extends Activity {
             }
         });
 
-        echoButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                output.setText("Sending ECHO...");
-                new Thread(new Runnable() {
-                    @Override
-                    public void run() {
-                        final String result = usb.sendEcho();
-                        runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                output.setText(result);
-                            }
-                        });
-                    }
-                }, "SP1EchoThread").start();
-            }
-        });
-
         stateButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -230,38 +197,6 @@ public class MainActivity extends Activity {
                         });
                     }
                 }, "SP1StateThread").start();
-            }
-        });
-
-        testWriteButton.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                output.setText("Test writing 3 dummy sectors to sector 0x70000 (far outside any\n"
-                        + "real album - safe, but this does touch the device)...");
-                progressBar.setProgress(0);
-                new Thread(new Runnable() {
-                    @Override
-                    public void run() {
-                        final String result = usb.testWrite(new Sp1UsbSerial.TransferProgressListener() {
-                            @Override
-                            public void onProgress(final int percent, final String statusText) {
-                                runOnUiThread(new Runnable() {
-                                    @Override
-                                    public void run() {
-                                        progressBar.setProgress(percent);
-                                        output.setText(statusText);
-                                    }
-                                });
-                            }
-                        });
-                        runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                output.setText(result);
-                            }
-                        });
-                    }
-                }, "SP1TestWriteThread").start();
             }
         });
 
@@ -288,13 +223,13 @@ public class MainActivity extends Activity {
                 transferActive = true;
                 scanButton.setEnabled(false);
                 connectButton.setEnabled(false);
-                echoButton.setEnabled(false);
                 stateButton.setEnabled(false);
-                testWriteButton.setEnabled(false);
                 addSongButton.setEnabled(false);
                 transferAlbumButton.setEnabled(false);
                 // disconnectButton stays enabled - it's how a transfer gets stopped
                 refreshSongListUI(); // also disables each row's Delete button
+
+                startTransferService();
 
                 new Thread(new Runnable() {
                     @Override
@@ -303,6 +238,7 @@ public class MainActivity extends Activity {
                                 new Sp1UsbSerial.TransferProgressListener() {
                                     @Override
                                     public void onProgress(final int percent, final String statusText) {
+                                        Sp1TransferService.updateProgress(MainActivity.this, statusText);
                                         runOnUiThread(new Runnable() {
                                             @Override
                                             public void run() {
@@ -318,6 +254,7 @@ public class MainActivity extends Activity {
                                 output.setText(result);
                                 transferActive = false;
                                 refreshSongListUI(); // re-enables each row's Delete button
+                                stopTransferService();
 
                                 // Not connection-gated - always safe to re-enable regardless of outcome.
                                 scanButton.setEnabled(true);
@@ -332,9 +269,7 @@ public class MainActivity extends Activity {
                                 } else {
                                     // normal completion (success or a real failure) - still connected,
                                     // so just re-enable what was disabled for the transfer.
-                                    echoButton.setEnabled(true);
                                     stateButton.setEnabled(true);
-                                    testWriteButton.setEnabled(true);
                                     transferAlbumButton.setEnabled(true);
                                 }
                             }
@@ -343,6 +278,20 @@ public class MainActivity extends Activity {
                 }, "SP1TransferAlbumThread").start();
             }
         });
+    }
+
+    /** Starts the foreground service that keeps the transfer alive through screen-off and backgrounding. */
+    private void startTransferService() {
+        Intent intent = new Intent(this, Sp1TransferService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
+    }
+
+    private void stopTransferService() {
+        stopService(new Intent(this, Sp1TransferService.class));
     }
 
     @Override
@@ -420,7 +369,7 @@ public class MainActivity extends Activity {
         List<Sp1AlbumState.Song> songs = albumState.getSongs();
         for (int i = 0; i < songs.size(); i++) {
             final int index = i;
-            Sp1AlbumState.Song song = songs.get(i);
+            final Sp1AlbumState.Song song = songs.get(i);
 
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
@@ -440,8 +389,22 @@ public class MainActivity extends Activity {
             deleteButton.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    albumState.removeSong(index);
-                    refreshSongListUI();
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("Delete song?")
+                            .setMessage("Remove \"" + song.title + "\" from the track list?"
+                                    + (song.isDone()
+                                    ? " It's already transferred, and every song after it will need to be"
+                                    + " re-transferred once you delete this one, since storage on the SP-1 is sequential."
+                                    : ""))
+                            .setPositiveButton("Delete", new android.content.DialogInterface.OnClickListener() {
+                                @Override
+                                public void onClick(android.content.DialogInterface dialog, int which) {
+                                    albumState.removeSong(index);
+                                    refreshSongListUI();
+                                }
+                            })
+                            .setNegativeButton("Cancel", null)
+                            .show();
                 }
             });
             row.addView(deleteButton);
@@ -514,6 +477,11 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         usb.unregisterPermissionReceiver();
-        usb.disconnect();
+        if (!transferActive) {
+            usb.disconnect();
+        }
+        // if a transfer IS active, deliberately leave the connection alone here -
+        // the background thread and foreground service keep it alive independently
+        // of this Activity instance's lifecycle.
     }
 }
